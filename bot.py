@@ -1,335 +1,293 @@
 """
-Polymarket Sports Price Drop Alert Bot for Telegram
-=====================================================
+Rainbet vs Polymarket odds difference alert bot for Telegram.
 
-This bot monitors SPORTS markets on Polymarket every N minutes and sends
-a Telegram notification whenever a major price drop is detected.
-
-Covered sports: NBA, NFL, NHL, MLB, soccer/football (EPL, Champions League,
-La Liga, MLS, FIFA World Cup), F1, tennis (Grand Slams, ATP), esports (LoL,
-CS2, Dota 2), boxing/MMA, and more.
-
-How it works:
-    1. Fetches active sports events from Polymarket's Gamma API (tag=Sports)
-    2. Filters to only real sports events using smart keyword matching
-    3. Gets current token prices from the CLOB API (no auth needed)
-    4. Compares current prices to the previous scan's prices
-    5. If a token drops by more than the configured threshold, sends an alert
-    6. Saves updated price data for the next comparison cycle
-
-Usage:
-    1. pip install -r requirements.txt
-    2. Fill in your config.json with your Telegram bot token and chat ID
-    3. python bot.py
+This bot uses Odds-API.io to fetch sports moneyline markets from Rainbet and
+Polymarket. Polymarket is treated as the oracle price. When Rainbet's implied
+probability differs from Polymarket by the configured threshold, the bot sends
+a Telegram alert.
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent.resolve()
 CONFIG_PATH = BASE_DIR / "config.json"
-STATE_PATH = BASE_DIR / "price_state.json"
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("polymarket_bot")
+logger = logging.getLogger("rainbet_polymarket_bot")
 
-# ---------------------------------------------------------------------------
-# Polymarket API helpers (all public — no auth required)
-# ---------------------------------------------------------------------------
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
+ODDS_API = "https://api.odds-api.io/v3"
+POLYMARKET_BOOK = "Polymarket"
+RAINBET_BOOK = "Rainbet"
 
-# Built-in sports keyword detection — used to filter out non-sports events
-# that the Gamma API returns even with tag=Sports.
-SPORTS_KEYWORDS = [
-    # Leagues & Competitions
-    "nba", "nfl", "nhl", "mlb", "mls", "fifa", "world cup", "champions league",
-    "premier league", "la liga", "serie a", "bundesliga", "ligue 1", "europa league",
-    "uefa", "afc", "concacaf", "copa america", "euro", "epl", "fa cup",
-    "carabao cup", "club world cup", "nationals league",
-    # Basketball
-    "basketball", "wnba", "ncaa basketball", "march madness",
-    # American Football
-    "football", "super bowl", "college football", "ncaa football",
-    # Baseball
-    "baseball", "world series",
-    # Ice Hockey
-    "hockey", "stanley cup",
-    # Soccer/football
-    "soccer", "match", "fc ", " vs ", " vs.", " v ",
-    "win the", "cup winner", "cup champion", "league winner",
-    # Motorsport
-    "f1", "formula 1", "formula one", "motogp", "nascar", "indycar",
-    # Tennis
-    "tennis", "open winner", "french open", "wimbledon", "us open",
-    "australian open", "atp", "wta", "davis cup",
-    # Golf
-    "golf", "pga", "lpga", "masters", "open championship", "ryder cup",
-    # Esports
-    "esport", "lol:", "league of legends", "counter-strike", "valorant",
-    "dota", "overwatch", "csgo", "cs2",
-    # Combat Sports
-    "boxing", "ufc", "mma", "bellator", "knockout",
-    # Olympics & misc
-    "olympic", "olympics", "paralympic", "x games",
-    # Teams (partial matches work since we check substring)
-    "lakers", "celtics", "warriors", "bulls", "mavericks", "nets", "knicks",
-    "heat", "bucks", "nuggets", "76ers", "suns", "clippers", "timberwolves",
-    "thunder", "rockets", "grizzlies", "hawks", "magic", "pacers", "cavaliers",
-    "raptors", "spurs", "pelicans", "kings", "trail blazers", "hornets",
-    "wizards", "pistons", "jazz",
-    "chiefs", "eagles", "49ers", "cowboys", "bills", "ravens", "packers",
-    "lions", "bengals", "dolphins", "chargers", "steelers", "broncos",
-    "seahawks", "vikings", "rams", "bears", "jets", "saints", "buccaneers",
-    "falcons", "commanders", "texans", "jaguars", "colts", "titans",
-    "panthers", "browns", "raiders", "patriots", "cardinals",
-    "yankees", "dodgers", "cubs", "red sox", "astros", "braves", "phillies",
-    "padres", "mariners", "giants", "mets", "orioles", "twins", "rangers",
-    "guardians", "tigers", "royals", "white sox", "blue jays", "rays",
-    "marlins", "reds", "brewers", "rockies", "diamondbacks", "pirates",
-    "angels", "athletics",
-    "oilers", "avalanche", "panthers", "stars", "rangers", "jets",
-    "hurricanes", "bruins", "maple leafs", "lightning", "capitals",
-    "flyers", "wings", "wild", "blues", "predators", "flames",
-    "canucks", "kraken", "golden knights", "coyotes", "sharks",
-    "senators", "sabres", "islanders", "blue jackets", "ducks",
-    "manchester united", "liverpool", "arsenal", "chelsea", "man city",
-    "real madrid", "barcelona", "bayern", "psg", "inter", "juve",
-    "dortmund", "napoli", "atletico", "tottenham", "ajax", "benfica",
-    "porto", "sporting",
-]
-
-# Keywords that indicate an event is NOT a real sports market
-EXCLUDE_KEYWORDS = [
-    "temperature", "bitcoin", "ethereum", "crypto", "elon musk", "tweet",
-    "presidential", "election", "prime minister", "parliamentary", "congress",
-    "fed decision", "fed rate", "interest rate", "crude oil", "stock",
-    "ai model", "company", "regime", "iran", "israel", "ceasefire",
-    "eurovision", "fed chair", "turnout", "votes", "poll",
-    "military", "invasion", "nato", "diplomatic", "greenland", "jesus",
-    "leader out", "tariff", "trump",
-]
+SPORTS_CONFIG: dict[str, dict[str, Any]] = {
+    "nba": {
+        "api_slug": "basketball",
+        "league_keywords": ["nba"],
+        "display_name": "NBA",
+    },
+    "cba": {
+        "api_slug": "basketball",
+        "league_keywords": ["china", "chinese", "cba"],
+        "display_name": "CBA",
+    },
+    "mlb": {
+        "api_slug": "baseball",
+        "league_keywords": ["mlb", "major league baseball"],
+        "display_name": "MLB",
+    },
+    "nhl": {
+        "api_slug": "ice-hockey",
+        "league_keywords": ["nhl", "national hockey league"],
+        "display_name": "NHL",
+    },
+}
 
 
-def fetch_active_events(limit: int = 100) -> list[dict]:
-    """Fetch active sports events from the Gamma API.
+def get_config_value(config: dict, path: list[str], env_name: str | None = None) -> Any:
+    """Read a nested config value with an optional environment fallback."""
+    value: Any = config
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            value = None
+            break
+        value = value[key]
 
-    Uses the tag=Sports parameter to fetch sports-specific events.
-    Each event contains nested markets with token_ids, which is the
-    most efficient way to bulk-load tradeable markets.
-
-    Args:
-        limit: Maximum number of events to return.
-
-    Returns:
-        List of event dictionaries from the Gamma API.
-    """
-    try:
-        resp = requests.get(
-            f"{GAMMA_API}/events",
-            params={
-                "active": "true",
-                "closed": "false",
-                "limit": limit,
-                "order": "volume24hr",
-                "ascending": "false",
-                "tag": "Sports",
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        events = resp.json()
-        logger.info(f"Fetched {len(events)} sports events from Gamma API")
-        return events
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch events: {e}")
-        return []
+    if env_name and (value is None or value == ""):
+        value = os.getenv(env_name)
+    return value
 
 
-def is_sports_event(title: str, question: str = "") -> bool:
-    """Determine if an event is a real sports market.
+def american_to_decimal(odds: float) -> float:
+    """Convert American odds to decimal odds."""
+    return odds / 100 + 1 if odds > 0 else 100 / abs(odds) + 1
 
-    The Gamma API's tag=Sports returns some non-sports events, so this
-    function applies a keyword-based filter to ensure only genuine
-    sports markets are included.
 
-    Args:
-        title: The event title.
-        question: Optional market question text.
+def normalize_to_decimal(raw_odds: float) -> float:
+    """Odds-API.io can return either decimal or American odds."""
+    if raw_odds == 0:
+        return 0
+    return american_to_decimal(raw_odds) if abs(raw_odds) > 100 or raw_odds < -100 else raw_odds
 
-    Returns:
-        True if the event appears to be a real sports market.
-    """
-    combined = f"{title} {question}".lower()
 
-    # First, exclude known non-sports topics
-    for exclude in EXCLUDE_KEYWORDS:
-        if exclude in combined:
-            return False
+def implied_probability(decimal_odds: float) -> float:
+    return 1 / decimal_odds if decimal_odds > 0 else 0
 
-    # Then check for at least one sports keyword
-    for keyword in SPORTS_KEYWORDS:
-        if keyword in combined:
+
+def format_odds(raw_odds: float, decimal_odds: float) -> str:
+    if abs(raw_odds) > 100 or raw_odds < -100:
+        return f"+{raw_odds:.0f}" if raw_odds > 0 else f"{raw_odds:.0f}"
+    return f"{decimal_odds:.2f}"
+
+
+def league_matches(league_name: str, keywords: list[str]) -> bool:
+    """Match league tokens exactly so NBA does not also match WNBA."""
+    if not keywords:
+        return True
+
+    normalized = league_name.lower()
+    tokens = [token for token in re.split(r"[^a-z0-9]+", normalized) if token]
+
+    for keyword in keywords:
+        keyword = keyword.lower()
+        if " " in keyword:
+            if keyword in normalized:
+                return True
+        elif keyword in tokens:
             return True
-
     return False
 
 
-def extract_markets(events: list[dict], extra_keywords: list[str] | None = None) -> list[dict]:
-    """Extract individual sports markets from events.
+class OddsApiClient:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.requests_made = 0
+        self.rate_limit_remaining: int | None = None
 
-    Each Polymarket event can contain multiple markets (outcomes).
-    This function flattens them into a single list with relevant fields,
-    filtering to only real sports events.
+    def get(self, endpoint: str, params: dict[str, str] | None = None) -> Any:
+        query = {"apiKey": self.api_key}
+        if params:
+            query.update(params)
 
-    Args:
-        events: List of event dicts from the Gamma API.
-        extra_keywords: Optional additional keywords to further filter markets
-            (e.g. ["NBA", "F1"] to only monitor specific sports).
+        response = requests.get(f"{ODDS_API}/{endpoint}", params=query, timeout=30)
+        self.requests_made += 1
 
-    Returns:
-        List of market dicts with token_id, question, volume, etc.
-    """
-    markets = []
-    extra_lower = [k.lower() for k in extra_keywords] if extra_keywords else []
+        remaining = response.headers.get("x-ratelimit-remaining")
+        if remaining and remaining.isdigit():
+            self.rate_limit_remaining = int(remaining)
 
-    for event in events:
-        event_title = event.get("title", "")
+        if response.status_code == 429:
+            raise RuntimeError("Odds-API.io rate limit exceeded")
+        response.raise_for_status()
+        return response.json()
 
-        for market in event.get("markets", []):
-            # Each market has outcomes with token IDs
-            question = market.get("question", "Unknown")
-            if not question:
-                continue
+    def get_events(self, sport: str, status: str, bookmaker: str) -> list[dict]:
+        result = self.get("events", {"sport": sport, "status": status, "bookmaker": bookmaker})
+        return result if isinstance(result, list) else []
 
-            # Apply built-in sports filter
-            if not is_sports_event(event_title, question):
-                continue
-
-            # Apply extra keyword filter if configured (e.g. only NBA & F1)
-            if extra_lower:
-                text = f"{question} {event_title}".lower()
-                if not any(kw in text for kw in extra_lower):
-                    continue
-
-            # Extract the "Yes" and "No" outcome token IDs
-            # NOTE: Gamma API returns these as JSON-encoded strings
-            raw_outcomes = market.get("outcomes", "[]")
-            raw_token_ids = market.get("clobTokenIds", "[]")
-            raw_prices = market.get("outcomePrices", "[]")
-
-            # Parse all JSON-encoded fields safely
-            def safe_json_parse(val):
-                if isinstance(val, str):
-                    try:
-                        return json.loads(val)
-                    except (json.JSONDecodeError, TypeError):
-                        return []
-                return val if isinstance(val, list) else []
-
-            outcome_list = safe_json_parse(raw_outcomes)
-            clob_token_ids = safe_json_parse(raw_token_ids)
-            price_list = safe_json_parse(raw_prices)
-
-            if not clob_token_ids:
-                continue
-
-            # Build a market entry for each outcome (Yes / No)
-            for i, token_id in enumerate(clob_token_ids):
-                outcome_label = outcome_list[i] if i < len(outcome_list) else f"Outcome {i}"
-                current_price = float(price_list[i]) if i < len(price_list) else None
-
-                markets.append({
-                    "token_id": token_id,
-                    "question": question,
-                    "event_title": event.get("title", ""),
-                    "outcome": outcome_label,
-                    "volume_24h": float(market.get("volume24hr", 0) or 0),
-                    "current_price": current_price,
-                    "market_slug": market.get("slug", ""),
-                    "condition_id": market.get("conditionId", ""),
-                })
-
-    logger.info(f"Extracted {len(markets)} token outcomes from events")
-    return markets
-
-
-def fetch_price_from_clob(token_id: str) -> float | None:
-    """Fetch the latest buy-side price for a token from the CLOB API.
-
-    This is used as a fallback when the Gamma API doesn't return prices.
-
-    Args:
-        token_id: The CLOB token ID.
-
-    Returns:
-        The price as a float, or None if unavailable.
-    """
-    try:
-        resp = requests.get(
-            f"{CLOB_API}/price",
-            params={"token_id": token_id, "side": "buy"},
-            timeout=10,
+    def get_multi_odds(self, event_ids: list[int], bookmakers: list[str]) -> list[dict]:
+        result = self.get(
+            "odds/multi",
+            {
+                "eventIds": ",".join(str(event_id) for event_id in event_ids[:10]),
+                "bookmakers": ",".join(bookmakers),
+            },
         )
-        resp.raise_for_status()
-        return float(resp.text)
-    except (requests.RequestException, ValueError) as e:
-        logger.debug(f"Could not fetch price for {token_id[:12]}...: {e}")
+        return result if isinstance(result, list) else []
+
+
+def parse_moneyline(bookmaker_markets: Any) -> dict[str, float] | None:
+    """Return normalized home/away moneyline odds for one bookmaker."""
+    if not isinstance(bookmaker_markets, list):
         return None
 
-
-def refresh_prices(markets: list[dict]) -> list[dict]:
-    """Ensure every market has an up-to-date price.
-
-    Uses the Gamma-provided price first; falls back to the CLOB API
-    for any tokens missing price data.
-
-    Args:
-        markets: List of market dicts (modified in place).
-
-    Returns:
-        The same list, with `current_price` populated where possible.
-    """
-    for market in markets:
-        if market.get("current_price") is not None:
+    for market in bookmaker_markets:
+        if not isinstance(market, dict) or market.get("name") != "ML":
             continue
-        price = fetch_price_from_clob(market["token_id"])
-        if price is not None:
-            market["current_price"] = price
-    return markets
+
+        odds_rows = market.get("odds")
+        if not isinstance(odds_rows, list) or not odds_rows:
+            continue
+
+        odds = odds_rows[0]
+        if not isinstance(odds, dict):
+            continue
+
+        home_raw = float(odds.get("home") or 0)
+        away_raw = float(odds.get("away") or 0)
+        home_decimal = normalize_to_decimal(home_raw)
+        away_decimal = normalize_to_decimal(away_raw)
+
+        if home_decimal > 1 and away_decimal > 1:
+            return {
+                "home": home_decimal,
+                "away": away_decimal,
+                "home_raw": home_raw,
+                "away_raw": away_raw,
+            }
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Telegram helpers
-# ---------------------------------------------------------------------------
+def build_difference(
+    team: str,
+    side: str,
+    polymarket_decimal: float,
+    rainbet_decimal: float,
+    polymarket_raw: float,
+    rainbet_raw: float,
+) -> dict[str, Any]:
+    poly_prob = implied_probability(polymarket_decimal)
+    rainbet_prob = implied_probability(rainbet_decimal)
+    probability_diff = rainbet_prob - poly_prob
+
+    return {
+        "team": team,
+        "side": side,
+        "polymarket_probability": poly_prob,
+        "rainbet_probability": rainbet_prob,
+        "probability_difference": probability_diff,
+        "absolute_difference": abs(probability_diff),
+        "polymarket_decimal": polymarket_decimal,
+        "rainbet_decimal": rainbet_decimal,
+        "polymarket_raw": polymarket_raw,
+        "rainbet_raw": rainbet_raw,
+        "value_signal": "rainbet_value"
+        if probability_diff < 0
+        else "rainbet_expensive"
+        if probability_diff > 0
+        else "even",
+    }
+
+
+def analyze_event(odds_data: dict, threshold_pct: float) -> dict | None:
+    bookmakers = odds_data.get("bookmakers")
+    if not isinstance(bookmakers, dict):
+        return None
+
+    polymarket = parse_moneyline(bookmakers.get(POLYMARKET_BOOK))
+    rainbet = parse_moneyline(bookmakers.get(RAINBET_BOOK))
+    if not polymarket or not rainbet:
+        return None
+
+    home_team = str(odds_data.get("home") or "Unknown Home")
+    away_team = str(odds_data.get("away") or "Unknown Away")
+    league = odds_data.get("league") if isinstance(odds_data.get("league"), dict) else {}
+    sport = odds_data.get("sport") if isinstance(odds_data.get("sport"), dict) else {}
+
+    home_diff = build_difference(
+        home_team,
+        "home",
+        polymarket["home"],
+        rainbet["home"],
+        polymarket["home_raw"],
+        rainbet["home_raw"],
+    )
+    away_diff = build_difference(
+        away_team,
+        "away",
+        polymarket["away"],
+        rainbet["away"],
+        polymarket["away_raw"],
+        rainbet["away_raw"],
+    )
+    biggest = home_diff if home_diff["absolute_difference"] >= away_diff["absolute_difference"] else away_diff
+
+    return {
+        "home_team": home_team,
+        "away_team": away_team,
+        "league": league.get("name", "Unknown League"),
+        "sport": sport.get("name", "Unknown Sport"),
+        "status": odds_data.get("status", "unknown"),
+        "date": odds_data.get("date"),
+        "home_difference": home_diff,
+        "away_difference": away_diff,
+        "biggest_difference": biggest,
+        "is_alert": biggest["absolute_difference"] * 100 >= threshold_pct,
+    }
+
+
+def scan_sport(client: OddsApiClient, sport_key: str, status: str, max_events: int, threshold_pct: float) -> list[dict]:
+    config = SPORTS_CONFIG[sport_key]
+    events = client.get_events(config["api_slug"], status, RAINBET_BOOK)
+    filtered_events = [
+        event
+        for event in events
+        if league_matches(str(event.get("league", {}).get("name", "")), config["league_keywords"])
+    ][:max_events]
+
+    event_ids = [int(event["id"]) for event in filtered_events if event.get("id")]
+    logger.info("%s: %s Rainbet events to compare", config["display_name"], len(event_ids))
+
+    analyses: list[dict] = []
+    for index in range(0, len(event_ids), 10):
+        batch = event_ids[index:index + 10]
+        odds_list = client.get_multi_odds(batch, [POLYMARKET_BOOK, RAINBET_BOOK])
+        for odds_data in odds_list:
+            if isinstance(odds_data, dict):
+                analysis = analyze_event(odds_data, threshold_pct)
+                if analysis:
+                    analyses.append(analysis)
+
+    return analyses
+
+
 def send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
-    """Send a message via the Telegram Bot API.
-
-    Args:
-        bot_token: Your Telegram bot token from @BotFather.
-        chat_id: The target chat ID.
-        text: The message body (supports Markdown).
-
-    Returns:
-        True if the message was sent successfully, False otherwise.
-    """
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -338,290 +296,190 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
         "disable_web_page_preview": True,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=15)
-        resp.raise_for_status()
+        response = requests.post(url, json=payload, timeout=15)
+        response.raise_for_status()
         return True
-    except requests.RequestException as e:
-        logger.error(f"Failed to send Telegram message: {e}")
+    except requests.RequestException as exc:
+        logger.error("Failed to send Telegram message: %s", exc)
         return False
 
 
-# ---------------------------------------------------------------------------
-# State persistence
-# ---------------------------------------------------------------------------
-def load_state() -> dict:
-    """Load the previous price state from disk.
-
-    Returns:
-        Dict mapping token_id -> {"price": float, "timestamp": str}.
-    """
-    if STATE_PATH.exists():
-        try:
-            data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-            return data.get("prices", {})
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.warning(f"Could not parse state file, starting fresh: {e}")
-    return {}
+def escape_markdown(text: str) -> str:
+    """Escape enough Markdown syntax for Telegram legacy Markdown mode."""
+    return str(text).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
 
 
-def save_state(prices: dict) -> None:
-    """Persist the current price state to disk.
-
-    Args:
-        prices: Dict mapping token_id -> {"price": float, "timestamp": str}.
-    """
-    data = {
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-        "prices": prices,
-    }
-    STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# Alert logic
-# ---------------------------------------------------------------------------
-def detect_drops(
-    markets: list[dict],
-    prev_state: dict,
-    threshold_pct: float,
-    min_volume: float,
-) -> list[dict]:
-    """Compare current prices to the previous state and find significant drops.
-
-    A "drop" is detected when a token's price decreases by at least
-    `threshold_pct` percent since the last scan.
-
-    Args:
-        markets: List of current market dicts with `current_price`.
-        prev_state: Previous price state from `load_state()`.
-        threshold_pct: Minimum percentage drop to trigger an alert (e.g. 5.0).
-        min_volume: Skip markets with 24h volume below this threshold.
-
-    Returns:
-        List of alert dicts with drop details.
-    """
-    alerts = []
-
-    for market in markets:
-        token_id = market["token_id"]
-        current_price = market.get("current_price")
-
-        # Skip tokens with no price data
-        if current_price is None:
-            continue
-
-        # Skip low-volume markets (noise filter)
-        if market.get("volume_24h", 0) < min_volume:
-            continue
-
-        # Skip tokens we haven't seen before (no baseline to compare)
-        if token_id not in prev_state:
-            continue
-
-        prev_price = prev_state[token_id].get("price")
-        if prev_price is None or prev_price <= 0:
-            continue
-
-        # Calculate percentage change
-        change_pct = ((current_price - prev_price) / prev_price) * 100
-
-        # Only alert on drops (negative change) exceeding threshold
-        if change_pct <= -threshold_pct:
-            alerts.append({
-                "question": market["question"],
-                "event_title": market["event_title"],
-                "outcome": market["outcome"],
-                "prev_price": prev_price,
-                "current_price": current_price,
-                "drop_pct": abs(change_pct),
-                "volume_24h": market.get("volume_24h", 0),
-                "token_id": token_id,
-            })
-
-    return alerts
-
-
-def format_alert(alert: dict) -> str:
-    """Format a single drop alert into a Telegram Markdown message.
-
-    Args:
-        alert: Alert dict from `detect_drops()`.
-
-    Returns:
-        Formatted message string.
-    """
+def format_difference_line(diff: dict) -> str:
+    sign = "+" if diff["probability_difference"] >= 0 else ""
+    label = "Rainbet higher" if diff["probability_difference"] > 0 else "Rainbet value"
     return (
-        f"*Price Drop Alert*\n"
-        f"_{alert['event_title']}_\n\n"
-        f"Market: *{alert['question']}*\n"
-        f"Outcome: *{alert['outcome']}*\n\n"
-        f"Previous: `{alert['prev_price']:.4f}`\n"
-        f"Current: `{alert['current_price']:.4f}`\n"
-        f"Drop: *-{alert['drop_pct']:.1f}%*\n"
-        f"24h Volume: `${alert['volume_24h']:,.0f}`\n"
+        f"*{escape_markdown(diff['team'])}* ({diff['side']})\n"
+        f"Polymarket: `{diff['polymarket_probability'] * 100:.1f}%` "
+        f"({format_odds(diff['polymarket_raw'], diff['polymarket_decimal'])})\n"
+        f"Rainbet: `{diff['rainbet_probability'] * 100:.1f}%` "
+        f"({format_odds(diff['rainbet_raw'], diff['rainbet_decimal'])})\n"
+        f"Diff: *{sign}{diff['probability_difference'] * 100:.1f}%* - {label}"
     )
 
 
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
+def format_alert(alert: dict) -> str:
+    biggest = alert["biggest_difference"]
+    date = alert.get("date") or "unknown time"
+    return (
+        "*Rainbet / Polymarket Odds Difference*\n"
+        f"_{escape_markdown(alert['league'])}_\n"
+        f"`{date}`\n\n"
+        f"*{escape_markdown(alert['home_team'])} vs {escape_markdown(alert['away_team'])}*\n"
+        f"Largest gap: *{escape_markdown(biggest['team'])}* "
+        f"`{biggest['probability_difference'] * 100:+.1f}%`\n\n"
+        f"{format_difference_line(alert['home_difference'])}\n\n"
+        f"{format_difference_line(alert['away_difference'])}"
+    )
+
+
 def load_config() -> dict:
-    """Load and validate configuration from config.json.
+    config = {
+        "telegram": {},
+        "odds_api": {},
+        "scanner": {
+            "interval_minutes": 10,
+            "difference_threshold_pct": 0,
+            "alert_rainbet_value_only": False,
+            "status": "pending,live",
+            "max_events_per_sport": 30,
+            "sports": ["nba", "nhl", "mlb"],
+        },
+    }
+    if CONFIG_PATH.exists():
+        try:
+            file_config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            for section in ("telegram", "odds_api", "scanner"):
+                config[section].update(file_config.get(section, {}))
+        except json.JSONDecodeError as exc:
+            logger.error("Invalid config.json: %s", exc)
+            sys.exit(1)
 
-    Returns:
-        Parsed config dictionary.
-
-    Raises:
-        SystemExit: If config is missing or invalid.
-    """
-    if not CONFIG_PATH.exists():
-        logger.error(
-            f"Config file not found: {CONFIG_PATH}\n"
-            f"Copy config.json.template to config.json and fill in your values."
-        )
+    api_key = os.getenv("ODDS_API_KEY") or get_config_value(config, ["odds_api", "api_key"])
+    if not api_key or str(api_key).startswith("YOUR_"):
+        logger.error("Set odds_api.api_key in config.json or ODDS_API_KEY in your environment")
         sys.exit(1)
 
-    try:
-        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid config.json: {e}")
+    telegram = config.get("telegram", {})
+    telegram["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN") or telegram.get("bot_token", "")
+    telegram["chat_id"] = os.getenv("TELEGRAM_CHAT_ID") or telegram.get("chat_id", "")
+    if not telegram["bot_token"] or telegram["bot_token"].startswith("YOUR_"):
+        logger.error("Set telegram.bot_token in config.json or TELEGRAM_BOT_TOKEN in your environment")
         sys.exit(1)
-
-    # Validate Telegram settings
-    tg = config.get("telegram", {})
-    if tg.get("bot_token", "").startswith("YOUR_"):
-        logger.error("Please set your Telegram bot token in config.json")
-        sys.exit(1)
-    if tg.get("chat_id", "").startswith("YOUR_"):
-        logger.error("Please set your Telegram chat ID in config.json")
+    if not telegram["chat_id"] or telegram["chat_id"].startswith("YOUR_"):
+        logger.error("Set telegram.chat_id in config.json or TELEGRAM_CHAT_ID in your environment")
         sys.exit(1)
 
     return config
 
 
-def run_scan_cycle(config: dict) -> None:
-    """Execute a single scan cycle: fetch → compare → alert → save.
+def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
+    scanner = config["scanner"]
+    api_key = get_config_value(config, ["odds_api", "api_key"], "ODDS_API_KEY")
+    sports = scanner.get("sports", ["nba", "nhl", "mlb"])
+    status = scanner.get("status", "pending,live")
+    threshold_pct = float(scanner.get("difference_threshold_pct", 0))
+    max_events = int(scanner.get("max_events_per_sport", 30))
+    value_only = bool(scanner.get("alert_rainbet_value_only", False))
 
-    Args:
-        config: Parsed configuration dictionary.
-    """
-    scanner_cfg = config["scanner"]
-    threshold = scanner_cfg["drop_threshold_pct"]
-    min_vol = scanner_cfg["min_volume"]
-    max_markets = scanner_cfg["max_markets_to_scan"]
-    keywords = scanner_cfg.get("sports_filter", [])
+    client = OddsApiClient(api_key)
+    all_results: list[dict] = []
 
-    tg_cfg = config["telegram"]
-    bot_token = tg_cfg["bot_token"]
-    chat_id = tg_cfg["chat_id"]
+    logger.info("--- Starting Rainbet vs Polymarket scan ---")
+    for sport in sports:
+        if sport not in SPORTS_CONFIG:
+            logger.warning("Skipping unsupported sport key: %s", sport)
+            continue
+        all_results.extend(scan_sport(client, sport, status, max_events, threshold_pct))
 
-    logger.info("--- Starting scan cycle ---")
+    alerts = [result for result in all_results if result["is_alert"]]
+    if value_only:
+        alerts = [
+            alert
+            for alert in alerts
+            if alert["biggest_difference"]["value_signal"] == "rainbet_value"
+        ]
 
-    # 1. Fetch active events
-    events = fetch_active_events(limit=max_markets)
-    if not events:
-        logger.warning("No events fetched. Skipping this cycle.")
-        return
+    alerts.sort(key=lambda alert: alert["biggest_difference"]["absolute_difference"], reverse=True)
+    logger.info(
+        "Compared %s matched games, found %s alert(s). API calls: %s, remaining: %s",
+        len(all_results),
+        len(alerts),
+        client.requests_made,
+        client.rate_limit_remaining,
+    )
 
-    # 2. Extract individual markets/outcomes
-    markets = extract_markets(events, keywords=keywords)
-    if not markets:
-        logger.warning("No markets extracted. Skipping this cycle.")
-        return
-
-    # 3. Refresh prices (fallback to CLOB API for any missing)
-    markets = refresh_prices(markets)
-
-    # 4. Load previous price state
-    prev_state = load_state()
-
-    # 5. Detect drops
-    alerts = detect_drops(markets, prev_state, threshold, min_vol)
-
-    # 6. Send alerts
-    if alerts:
-        logger.info(f"Detected {len(alerts)} price drop(s)!")
-
-        # Send summary header
+    if send_alerts and alerts:
+        telegram = config["telegram"]
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         header = (
-            f"*Polymarket Sports Scanner* ({now})\n"
-            f"{len(alerts)} alert(s) found\n"
+            f"*Rainbet Odds Scanner* ({now})\n"
+            f"Oracle: `{POLYMARKET_BOOK}`\n"
+            f"Compared book: `{RAINBET_BOOK}`\n"
+            f"Alerts: *{len(alerts)}* / matched games: `{len(all_results)}`"
         )
-        send_telegram_message(bot_token, chat_id, header)
+        send_telegram_message(telegram["bot_token"], telegram["chat_id"], header)
 
-        # Send individual alerts (Telegram rate limit: ~30 msg/sec)
-        for alert in sorted(alerts, key=lambda a: a["drop_pct"], reverse=True):
-            msg = format_alert(alert)
-            success = send_telegram_message(bot_token, chat_id, msg)
-            if success:
-                logger.info(
-                    f"  Alert: {alert['outcome']} for '{alert['question']}' "
-                    f"dropped {alert['drop_pct']:.1f}%"
-                )
-            time.sleep(0.1)  # Brief pause between messages
-    else:
-        logger.info("No significant price drops detected.")
+        for alert in alerts:
+            send_telegram_message(telegram["bot_token"], telegram["chat_id"], format_alert(alert))
+            time.sleep(0.2)
+    elif not alerts:
+        logger.info("No Rainbet/Polymarket differences met the configured threshold.")
 
-    # 7. Save current prices for next cycle
-    new_state = {}
-    for market in markets:
-        price = market.get("current_price")
-        if price is not None:
-            new_state[market["token_id"]] = {
-                "price": price,
-                "question": market["question"],
-                "outcome": market["outcome"],
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-    save_state(new_state)
-    logger.info(f"Saved price state for {len(new_state)} tokens.")
+    return alerts
 
 
-def main():
-    """Main entry point. Loads config and runs the scan loop."""
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Compare Rainbet odds against Polymarket and alert on Telegram.")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single scan and exit. Intended for GitHub Actions scheduling.",
+    )
+    args = parser.parse_args()
+
     logger.info("=" * 60)
-    logger.info("  Polymarket Sports Price Drop Alert Bot")
+    logger.info("  Rainbet vs Polymarket Sports Alert Bot")
     logger.info("=" * 60)
 
     config = load_config()
+    interval_min = float(config["scanner"].get("interval_minutes", 10))
 
-    interval_min = config["scanner"]["interval_minutes"]
-    interval_sec = interval_min * 60
-    logger.info(f"Scan interval: every {interval_min} minutes")
-    logger.info(f"Drop threshold: {config['scanner']['drop_threshold_pct']}%")
-    logger.info(f"Min 24h volume: ${config['scanner']['min_volume']:,.0f}")
+    if args.once:
+        run_scan_cycle(config)
+        return
 
-    # Send startup message
     send_telegram_message(
         config["telegram"]["bot_token"],
         config["telegram"]["chat_id"],
-        "*Polymarket Sports Bot Started*\nMonitoring sports markets for "
-        f"price drops every {interval_min} minutes.\nThreshold: "
-        f"-{config['scanner']['drop_threshold_pct']}%",
+        "*Rainbet Odds Bot Started*\n"
+        f"Comparing `{RAINBET_BOOK}` against `{POLYMARKET_BOOK}` every {interval_min:g} minutes.",
     )
 
-    # Run the scan loop
     while True:
         try:
             run_scan_cycle(config)
-        except Exception as e:
-            logger.error(f"Error during scan cycle: {e}", exc_info=True)
+        except Exception as exc:
+            logger.error("Error during scan cycle: %s", exc, exc_info=True)
             send_telegram_message(
                 config["telegram"]["bot_token"],
                 config["telegram"]["chat_id"],
-                f"*Bot Error*\n{str(e)[:500]}",
+                f"*Bot Error*\n`{escape_markdown(str(exc)[:500])}`",
             )
 
-        logger.info(f"Sleeping for {interval_min} minutes...")
+        logger.info("Sleeping for %s minutes...", interval_min)
         try:
-            time.sleep(interval_sec)
+            time.sleep(interval_min * 60)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
             send_telegram_message(
                 config["telegram"]["bot_token"],
                 config["telegram"]["chat_id"],
-                "*Polymarket Sports Bot Stopped*\nGoodbye!",
+                "*Rainbet Odds Bot Stopped*",
             )
             break
 

@@ -3,11 +3,15 @@
         "bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
         "chat_id": "YOUR_TELEGRAM_CHAT_ID_HERE"
     },
+    "odds_api": {
+        "api_key": "YOUR_ODDS_API_KEY_HERE"
+    },
     "scanner": {
         "interval_minutes": 10,
-        "drop_threshold_pct": 5.0,
-        "min_volume": 1000,
-        "max_markets_to_scan": 100,
-        "sports_filter": []
+        "difference_threshold_pct": 0,
+        "alert_rainbet_value_only": false,
+        "status": "pending,live",
+        "max_events_per_sport": 30,
+        "sports": ["nba", "nhl", "mlb"]
     }
 }

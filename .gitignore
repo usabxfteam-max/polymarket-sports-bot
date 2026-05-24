@@ -1,14 +1,5 @@
-# Credentials & runtime state
 config.json
-price_state.json
 __pycache__/
 *.pyc
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# OS
-.DS_Store
-Thumbs.db
+.venv/
+venv/
