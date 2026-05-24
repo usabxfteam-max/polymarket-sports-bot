@@ -10,7 +10,8 @@ Polymarket is treated as the oracle. Rainbet is the compared sportsbook. When th
 2. Pulls batched odds for `Polymarket,Rainbet`
 3. Compares moneyline implied probability for home and away outcomes
 4. Sends Telegram alerts for differences that meet the threshold
-5. Repeats every configured interval
+5. Sends a follow-up only when the compared odds change
+6. Repeats every configured interval
 
 ## Setup
 
@@ -81,6 +82,8 @@ python bot.py --once
 
 The included workflow at `.github/workflows/rainbet-alerts.yml` runs one scan
 every five minutes, the minimum scheduled interval supported by GitHub Actions.
+It caches the last alerted odds so an unchanged difference is not resent on
+each scheduled run.
 
 In your GitHub repository, open **Settings > Secrets and variables > Actions**
 and create these repository secrets:

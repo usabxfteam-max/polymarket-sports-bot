@@ -24,6 +24,7 @@ import requests
 
 BASE_DIR = Path(__file__).parent.resolve()
 CONFIG_PATH = BASE_DIR / "config.json"
+ALERT_STATE_PATH = BASE_DIR / "alert_state.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -337,6 +338,47 @@ def format_alert(alert: dict) -> str:
     )
 
 
+def alert_key(alert: dict) -> str:
+    """Create a stable ID for a compared game."""
+    return "|".join(
+        [
+            str(alert.get("league", "")),
+            str(alert.get("home_team", "")),
+            str(alert.get("away_team", "")),
+            str(alert.get("date", "")),
+        ]
+    )
+
+
+def alert_signature(alert: dict) -> dict[str, float]:
+    """Track displayed odds so unchanged alerts are not sent repeatedly."""
+    return {
+        "poly_home": alert["home_difference"]["polymarket_decimal"],
+        "rainbet_home": alert["home_difference"]["rainbet_decimal"],
+        "poly_away": alert["away_difference"]["polymarket_decimal"],
+        "rainbet_away": alert["away_difference"]["rainbet_decimal"],
+    }
+
+
+def load_alert_state() -> dict[str, dict[str, float]]:
+    if not ALERT_STATE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(ALERT_STATE_PATH.read_text(encoding="utf-8"))
+        return data.get("alerts", {}) if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        logger.warning("Could not parse alert state; starting a fresh alert baseline.")
+        return {}
+
+
+def save_alert_state(alerts: list[dict]) -> None:
+    data = {
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+        "alerts": {alert_key(alert): alert_signature(alert) for alert in alerts},
+    }
+    ALERT_STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def load_config() -> dict:
     config = {
         "telegram": {},
@@ -405,32 +447,43 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
         ]
 
     alerts.sort(key=lambda alert: alert["biggest_difference"]["absolute_difference"], reverse=True)
+    previous_alerts = load_alert_state()
+    changed_alerts = [
+        alert
+        for alert in alerts
+        if previous_alerts.get(alert_key(alert)) != alert_signature(alert)
+    ]
+    if all_results:
+        save_alert_state(alerts)
     logger.info(
-        "Compared %s matched games, found %s alert(s). API calls: %s, remaining: %s",
+        "Compared %s matched games, found %s alert(s), %s new or changed. API calls: %s, remaining: %s",
         len(all_results),
         len(alerts),
+        len(changed_alerts),
         client.requests_made,
         client.rate_limit_remaining,
     )
 
-    if send_alerts and alerts:
+    if send_alerts and changed_alerts:
         telegram = config["telegram"]
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         header = (
             f"*Rainbet Odds Scanner* ({now})\n"
             f"Oracle: `{POLYMARKET_BOOK}`\n"
             f"Compared book: `{RAINBET_BOOK}`\n"
-            f"Alerts: *{len(alerts)}* / matched games: `{len(all_results)}`"
+            f"New or updated alerts: *{len(changed_alerts)}* / matched games: `{len(all_results)}`"
         )
         send_telegram_message(telegram["bot_token"], telegram["chat_id"], header)
 
-        for alert in alerts:
+        for alert in changed_alerts:
             send_telegram_message(telegram["bot_token"], telegram["chat_id"], format_alert(alert))
             time.sleep(0.2)
+    elif send_alerts and alerts:
+        logger.info("No changed odds since the last alerted comparison.")
     elif not alerts:
         logger.info("No Rainbet/Polymarket differences met the configured threshold.")
 
-    return alerts
+    return changed_alerts
 
 
 def main() -> None:
