@@ -38,15 +38,30 @@ POLYMARKET_BOOK = "Polymarket"
 RAINBET_BOOK = "Rainbet"
 
 SPORTS_CONFIG: dict[str, dict[str, Any]] = {
+    "basketball": {
+        "api_slug": "basketball",
+        "league_keywords": [],
+        "display_name": "Basketball (NBA, WNBA, international)",
+    },
     "nba": {
         "api_slug": "basketball",
         "league_keywords": ["nba"],
         "display_name": "NBA",
     },
+    "wnba": {
+        "api_slug": "basketball",
+        "league_keywords": ["wnba"],
+        "display_name": "WNBA",
+    },
     "cba": {
         "api_slug": "basketball",
         "league_keywords": ["china", "chinese", "cba"],
         "display_name": "CBA",
+    },
+    "baseball": {
+        "api_slug": "baseball",
+        "league_keywords": [],
+        "display_name": "Baseball (including MLB)",
     },
     "mlb": {
         "api_slug": "baseball",
@@ -57,6 +72,36 @@ SPORTS_CONFIG: dict[str, dict[str, Any]] = {
         "api_slug": "ice-hockey",
         "league_keywords": ["nhl", "national hockey league"],
         "display_name": "NHL",
+    },
+    "nfl": {
+        "api_slug": "american-football",
+        "league_keywords": ["nfl", "national football league"],
+        "display_name": "NFL",
+    },
+    "ice_hockey": {
+        "api_slug": "ice-hockey",
+        "league_keywords": [],
+        "display_name": "Ice Hockey",
+    },
+    "american_football": {
+        "api_slug": "american-football",
+        "league_keywords": [],
+        "display_name": "American Football",
+    },
+    "football": {
+        "api_slug": "football",
+        "league_keywords": [],
+        "display_name": "Football / Soccer",
+    },
+    "tennis": {
+        "api_slug": "tennis",
+        "league_keywords": [],
+        "display_name": "Tennis",
+    },
+    "esports": {
+        "api_slug": "esports",
+        "league_keywords": [],
+        "display_name": "Esports",
     },
 }
 
@@ -120,6 +165,7 @@ class OddsApiClient:
         self.api_key = api_key
         self.requests_made = 0
         self.rate_limit_remaining: int | None = None
+        self.events_cache: dict[tuple[str, str, str], list[dict]] = {}
 
     def get(self, endpoint: str, params: dict[str, str] | None = None) -> Any:
         query = {"apiKey": self.api_key}
@@ -139,8 +185,13 @@ class OddsApiClient:
         return response.json()
 
     def get_events(self, sport: str, status: str, bookmaker: str) -> list[dict]:
+        cache_key = (sport, status, bookmaker)
+        if cache_key in self.events_cache:
+            return self.events_cache[cache_key]
         result = self.get("events", {"sport": sport, "status": status, "bookmaker": bookmaker})
-        return result if isinstance(result, list) else []
+        events = result if isinstance(result, list) else []
+        self.events_cache[cache_key] = events
+        return events
 
     def get_multi_odds(self, event_ids: list[int], bookmakers: list[str]) -> list[dict]:
         result = self.get(
@@ -154,7 +205,7 @@ class OddsApiClient:
 
 
 def parse_moneyline(bookmaker_markets: Any) -> dict[str, float] | None:
-    """Return normalized home/away moneyline odds for one bookmaker."""
+    """Return normalized moneyline odds for one bookmaker."""
     if not isinstance(bookmaker_markets, list):
         return None
 
@@ -176,12 +227,18 @@ def parse_moneyline(bookmaker_markets: Any) -> dict[str, float] | None:
         away_decimal = normalize_to_decimal(away_raw)
 
         if home_decimal > 1 and away_decimal > 1:
-            return {
+            parsed = {
                 "home": home_decimal,
                 "away": away_decimal,
                 "home_raw": home_raw,
                 "away_raw": away_raw,
             }
+            draw_raw = float(odds.get("draw") or 0)
+            draw_decimal = normalize_to_decimal(draw_raw)
+            if draw_decimal > 1:
+                parsed["draw"] = draw_decimal
+                parsed["draw_raw"] = draw_raw
+            return parsed
     return None
 
 
@@ -247,7 +304,19 @@ def analyze_event(odds_data: dict, threshold_pct: float) -> dict | None:
         polymarket["away_raw"],
         rainbet["away_raw"],
     )
-    biggest = home_diff if home_diff["absolute_difference"] >= away_diff["absolute_difference"] else away_diff
+    differences = [home_diff, away_diff]
+    if polymarket.get("draw", 0) > 1 and rainbet.get("draw", 0) > 1:
+        differences.append(
+            build_difference(
+                "Draw",
+                "draw",
+                polymarket["draw"],
+                rainbet["draw"],
+                polymarket["draw_raw"],
+                rainbet["draw_raw"],
+            )
+        )
+    biggest = max(differences, key=lambda difference: difference["absolute_difference"])
 
     return {
         "home_team": home_team,
@@ -258,6 +327,7 @@ def analyze_event(odds_data: dict, threshold_pct: float) -> dict | None:
         "date": odds_data.get("date"),
         "home_difference": home_diff,
         "away_difference": away_diff,
+        "differences": differences,
         "biggest_difference": biggest,
         "is_alert": biggest["absolute_difference"] * 100 >= threshold_pct,
     }
@@ -265,15 +335,19 @@ def analyze_event(odds_data: dict, threshold_pct: float) -> dict | None:
 
 def scan_sport(client: OddsApiClient, sport_key: str, status: str, max_events: int, threshold_pct: float) -> list[dict]:
     config = SPORTS_CONFIG[sport_key]
-    events = client.get_events(config["api_slug"], status, RAINBET_BOOK)
-    filtered_events = [
+    rainbet_events = client.get_events(config["api_slug"], status, RAINBET_BOOK)
+    events_to_compare = [
         event
-        for event in events
+        for event in rainbet_events
         if league_matches(str(event.get("league", {}).get("name", "")), config["league_keywords"])
     ][:max_events]
 
-    event_ids = [int(event["id"]) for event in filtered_events if event.get("id")]
-    logger.info("%s: %s Rainbet events to compare", config["display_name"], len(event_ids))
+    event_ids = [int(event["id"]) for event in events_to_compare if event.get("id")]
+    logger.info(
+        "%s: %s Rainbet event(s) submitted for Polymarket comparison",
+        config["display_name"],
+        len(event_ids),
+    )
 
     analyses: list[dict] = []
     for index in range(0, len(event_ids), 10):
@@ -333,9 +407,8 @@ def format_alert(alert: dict) -> str:
         f"`{date}`\n\n"
         f"*{escape_markdown(alert['home_team'])} vs {escape_markdown(alert['away_team'])}*\n"
         f"Candidate Rainbet bet: *{escape_markdown(biggest['team'])}* "
-        f"`{biggest['probability_difference'] * 100:+.1f}%`\n\n"
-        f"{format_difference_line(alert['home_difference'])}\n\n"
-        f"{format_difference_line(alert['away_difference'])}"
+        f"`{biggest['probability_difference'] * 100:+.1f}%`\n\n" +
+        "\n\n".join(format_difference_line(difference) for difference in alert["differences"])
     )
 
 
@@ -353,12 +426,11 @@ def alert_key(alert: dict) -> str:
 
 def alert_signature(alert: dict) -> dict[str, float]:
     """Track displayed odds so unchanged alerts are not sent repeatedly."""
-    return {
-        "poly_home": alert["home_difference"]["polymarket_decimal"],
-        "rainbet_home": alert["home_difference"]["rainbet_decimal"],
-        "poly_away": alert["away_difference"]["polymarket_decimal"],
-        "rainbet_away": alert["away_difference"]["rainbet_decimal"],
-    }
+    signature: dict[str, float] = {}
+    for difference in alert["differences"]:
+        signature[f"poly_{difference['side']}"] = difference["polymarket_decimal"]
+        signature[f"rainbet_{difference['side']}"] = difference["rainbet_decimal"]
+    return signature
 
 
 def load_alert_state() -> dict[str, dict[str, float]]:
@@ -389,8 +461,9 @@ def load_config() -> dict:
             "difference_threshold_pct": 0,
             "alert_rainbet_value_only": True,
             "status": "pending,live",
-            "max_events_per_sport": 30,
-            "sports": ["nba", "nhl", "mlb"],
+            "max_events_per_sport": 50,
+            "max_alerts_per_scan": 20,
+            "sports": ["nba", "wnba", "mlb", "nhl", "nfl"],
         },
     }
     if CONFIG_PATH.exists():
@@ -423,10 +496,14 @@ def load_config() -> dict:
 def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
     scanner = config["scanner"]
     api_key = get_config_value(config, ["odds_api", "api_key"], "ODDS_API_KEY")
-    sports = scanner.get("sports", ["nba", "nhl", "mlb"])
+    sports = scanner.get(
+        "sports",
+        ["nba", "wnba", "mlb", "nhl", "nfl"],
+    )
     status = scanner.get("status", "pending,live")
     threshold_pct = float(scanner.get("difference_threshold_pct", 0))
-    max_events = int(scanner.get("max_events_per_sport", 30))
+    max_events = int(scanner.get("max_events_per_sport", 50))
+    max_alerts = int(scanner.get("max_alerts_per_scan", 20))
     value_only = bool(scanner.get("alert_rainbet_value_only", True))
 
     client = OddsApiClient(api_key)
@@ -445,7 +522,7 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
         for alert in alerts:
             rainbet_values = [
                 difference
-                for difference in (alert["home_difference"], alert["away_difference"])
+                for difference in alert["differences"]
                 if difference["probability_difference"] < 0
                 and difference["absolute_difference"] * 100 >= threshold_pct
             ]
@@ -467,6 +544,7 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
     ]
     if all_results:
         save_alert_state(alerts)
+    notification_alerts = changed_alerts[:max_alerts]
     logger.info(
         "Compared %s matched games, found %s alert(s), %s new or changed. API calls: %s, remaining: %s",
         len(all_results),
@@ -483,11 +561,12 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
             f"*Rainbet Betting Opportunities* ({now})\n"
             f"Trusted oracle: `{POLYMARKET_BOOK}`\n"
             f"Betting venue: `{RAINBET_BOOK}`\n"
-            f"New or updated opportunities: *{len(changed_alerts)}* / matched games: `{len(all_results)}`"
+            f"New or updated opportunities: *{len(changed_alerts)}* / matched games: `{len(all_results)}`\n"
+            f"Sending top opportunities: `{len(notification_alerts)}`"
         )
         send_telegram_message(telegram["bot_token"], telegram["chat_id"], header)
 
-        for alert in changed_alerts:
+        for alert in notification_alerts:
             send_telegram_message(telegram["bot_token"], telegram["chat_id"], format_alert(alert))
             time.sleep(0.2)
     elif send_alerts and alerts:

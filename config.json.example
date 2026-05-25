@@ -11,7 +11,8 @@
         "difference_threshold_pct": 0,
         "alert_rainbet_value_only": true,
         "status": "pending,live",
-        "max_events_per_sport": 30,
-        "sports": ["nba", "nhl", "mlb"]
+        "max_events_per_sport": 50,
+        "max_alerts_per_scan": 20,
+        "sports": ["nba", "wnba", "mlb", "nhl", "nfl"]
     }
 }

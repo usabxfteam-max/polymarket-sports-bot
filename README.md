@@ -6,8 +6,8 @@ Polymarket is treated as the trusted oracle. Rainbet is the betting venue. The b
 
 ## How It Works
 
-1. Fetches active or upcoming Rainbet events from Odds-API.io
-2. Pulls batched odds for `Polymarket,Rainbet`
+1. Fetches active or upcoming Rainbet events for the configured leagues through Odds-API.io
+2. Pulls batched odds for `Polymarket,Rainbet`; events without both prices are ignored
 3. Compares moneyline implied probability for home and away outcomes
 4. Sends Telegram alerts only for candidate bets at Rainbet priced better than the Polymarket oracle
 5. Sends a follow-up only when the compared odds change
@@ -45,8 +45,9 @@ Edit `config.json`:
         "difference_threshold_pct": 0,
         "alert_rainbet_value_only": true,
         "status": "pending,live",
-        "max_events_per_sport": 30,
-        "sports": ["nba", "nhl", "mlb"]
+        "max_events_per_sport": 50,
+        "max_alerts_per_scan": 20,
+        "sports": ["nba", "wnba", "mlb", "nhl", "nfl"]
     }
 }
 ```
@@ -63,8 +64,9 @@ The Telegram values can also be supplied with `TELEGRAM_BOT_TOKEN` and
 | `difference_threshold_pct` | Minimum probability gap in percentage points. `0` alerts on any difference; `2` alerts on gaps of at least 2 points. |
 | `alert_rainbet_value_only` | Keep `true` to alert only when the candidate bet is priced better at Rainbet than at the Polymarket oracle. |
 | `status` | Odds-API event status filter, usually `pending,live`. |
-| `max_events_per_sport` | Maximum Rainbet events to compare per sport per scan. |
-| `sports` | Supported keys: `nba`, `nhl`, `mlb`, `cba`. |
+| `max_events_per_sport` | Maximum shared Rainbet/Polymarket events to compare per sport per scan. |
+| `max_alerts_per_scan` | Caps Telegram detail messages per run; all matched events are still checked and ranked. |
+| `sports` | Default major-league keys: `nba`, `wnba`, `mlb`, `nhl`, `nfl`. Optional broad keys include `basketball`, `baseball`, `ice_hockey`, `american_football`, `football`, `tennis`, `esports`. |
 
 ## Run
 
@@ -121,6 +123,9 @@ Diff: -3.1% - Rainbet value
 ## Notes
 
 - Only moneyline (`ML`) markets are compared.
+- Three-way football/soccer moneylines include draw outcomes.
 - Polymarket is used as the trusted reference price.
 - Rainbet lower implied probability than Polymarket means Rainbet offers the candidate betting opportunity.
 - Alerts provide signals for betting at Rainbet; the bot does not submit wagers.
+- A league such as MLB is tracked, but no comparison is possible during scans where Rainbet has no matching MLB event listed.
+- Odds-API.io permits 100 requests per hour on the configured key. The default major-league scan is designed for the 10-minute workflow; enabling broad football, tennis, or esports coverage may exceed that limit.
