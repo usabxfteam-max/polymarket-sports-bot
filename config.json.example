@@ -9,7 +9,7 @@
     "scanner": {
         "interval_minutes": 10,
         "difference_threshold_pct": 0,
-        "alert_rainbet_value_only": false,
+        "alert_rainbet_value_only": true,
         "status": "pending,live",
         "max_events_per_sport": 30,
         "sports": ["nba", "nhl", "mlb"]

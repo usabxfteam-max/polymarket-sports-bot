@@ -2,14 +2,14 @@
 
 A Telegram bot that compares **Rainbet** moneyline odds against **Polymarket** prices through [Odds-API.io](https://docs.odds-api.io/).
 
-Polymarket is treated as the oracle. Rainbet is the compared sportsbook. When the implied probability differs by your configured threshold, the bot sends a Telegram alert.
+Polymarket is treated as the trusted oracle. Rainbet is the betting venue. The bot sends a Telegram signal only when Rainbet offers a cheaper implied probability than Polymarket for the same outcome.
 
 ## How It Works
 
 1. Fetches active or upcoming Rainbet events from Odds-API.io
 2. Pulls batched odds for `Polymarket,Rainbet`
 3. Compares moneyline implied probability for home and away outcomes
-4. Sends Telegram alerts for differences that meet the threshold
+4. Sends Telegram alerts only for candidate bets at Rainbet priced better than the Polymarket oracle
 5. Sends a follow-up only when the compared odds change
 6. Repeats every configured interval
 
@@ -43,7 +43,7 @@ Edit `config.json`:
     "scanner": {
         "interval_minutes": 10,
         "difference_threshold_pct": 0,
-        "alert_rainbet_value_only": false,
+        "alert_rainbet_value_only": true,
         "status": "pending,live",
         "max_events_per_sport": 30,
         "sports": ["nba", "nhl", "mlb"]
@@ -61,7 +61,7 @@ The Telegram values can also be supplied with `TELEGRAM_BOT_TOKEN` and
 | Setting | Description |
 |---------|-------------|
 | `difference_threshold_pct` | Minimum probability gap in percentage points. `0` alerts on any difference; `2` alerts on gaps of at least 2 points. |
-| `alert_rainbet_value_only` | If `true`, only alert when Rainbet is cheaper than Polymarket's oracle probability. |
+| `alert_rainbet_value_only` | Keep `true` to alert only when the candidate bet is priced better at Rainbet than at the Polymarket oracle. |
 | `status` | Odds-API event status filter, usually `pending,live`. |
 | `max_events_per_sport` | Maximum Rainbet events to compare per sport per scan. |
 | `sports` | Supported keys: `nba`, `nhl`, `mlb`, `cba`. |
@@ -81,7 +81,7 @@ python bot.py --once
 ## Run On GitHub Actions
 
 The included workflow at `.github/workflows/rainbet-alerts.yml` runs one scan
-every five minutes, the minimum scheduled interval supported by GitHub Actions.
+every ten minutes.
 It caches the last alerted odds so an unchanged difference is not resent on
 each scheduled run.
 
@@ -104,21 +104,23 @@ GitHub disables scheduled workflows after 60 days without repository activity.
 ## Example Telegram Alert
 
 ```text
-Rainbet / Polymarket Odds Difference
+Rainbet Betting Opportunity
+Trusted oracle: Polymarket | Bet at: Rainbet
 USA - NBA
 2026-05-26T00:00:00Z
 
 Cleveland Cavaliers vs New York Knicks
-Largest gap: Cleveland Cavaliers +3.1%
+Candidate Rainbet bet: Cleveland Cavaliers -3.1%
 
 Cleveland Cavaliers (home)
-Polymarket: 45.0% (2.22)
-Rainbet: 48.1% (2.08)
-Diff: +3.1% - Rainbet higher
+Polymarket: 48.1% (2.08)
+Rainbet: 45.0% (2.22)
+Diff: -3.1% - Rainbet value
 ```
 
 ## Notes
 
 - Only moneyline (`ML`) markets are compared.
-- Rainbet lower implied probability than Polymarket means Rainbet is offering a better price than the oracle.
-- Rainbet higher implied probability than Polymarket means Rainbet is pricing that side more expensively than the oracle.
+- Polymarket is used as the trusted reference price.
+- Rainbet lower implied probability than Polymarket means Rainbet offers the candidate betting opportunity.
+- Alerts provide signals for betting at Rainbet; the bot does not submit wagers.

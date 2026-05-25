@@ -327,11 +327,12 @@ def format_alert(alert: dict) -> str:
     biggest = alert["biggest_difference"]
     date = alert.get("date") or "unknown time"
     return (
-        "*Rainbet / Polymarket Odds Difference*\n"
+        "*Rainbet Betting Opportunity*\n"
+        f"Trusted oracle: `{POLYMARKET_BOOK}` | Bet at: `{RAINBET_BOOK}`\n"
         f"_{escape_markdown(alert['league'])}_\n"
         f"`{date}`\n\n"
         f"*{escape_markdown(alert['home_team'])} vs {escape_markdown(alert['away_team'])}*\n"
-        f"Largest gap: *{escape_markdown(biggest['team'])}* "
+        f"Candidate Rainbet bet: *{escape_markdown(biggest['team'])}* "
         f"`{biggest['probability_difference'] * 100:+.1f}%`\n\n"
         f"{format_difference_line(alert['home_difference'])}\n\n"
         f"{format_difference_line(alert['away_difference'])}"
@@ -386,7 +387,7 @@ def load_config() -> dict:
         "scanner": {
             "interval_minutes": 10,
             "difference_threshold_pct": 0,
-            "alert_rainbet_value_only": False,
+            "alert_rainbet_value_only": True,
             "status": "pending,live",
             "max_events_per_sport": 30,
             "sports": ["nba", "nhl", "mlb"],
@@ -426,7 +427,7 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
     status = scanner.get("status", "pending,live")
     threshold_pct = float(scanner.get("difference_threshold_pct", 0))
     max_events = int(scanner.get("max_events_per_sport", 30))
-    value_only = bool(scanner.get("alert_rainbet_value_only", False))
+    value_only = bool(scanner.get("alert_rainbet_value_only", True))
 
     client = OddsApiClient(api_key)
     all_results: list[dict] = []
@@ -440,11 +441,22 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
 
     alerts = [result for result in all_results if result["is_alert"]]
     if value_only:
-        alerts = [
-            alert
-            for alert in alerts
-            if alert["biggest_difference"]["value_signal"] == "rainbet_value"
-        ]
+        value_alerts = []
+        for alert in alerts:
+            rainbet_values = [
+                difference
+                for difference in (alert["home_difference"], alert["away_difference"])
+                if difference["probability_difference"] < 0
+                and difference["absolute_difference"] * 100 >= threshold_pct
+            ]
+            if rainbet_values:
+                opportunity = dict(alert)
+                opportunity["biggest_difference"] = max(
+                    rainbet_values,
+                    key=lambda difference: difference["absolute_difference"],
+                )
+                value_alerts.append(opportunity)
+        alerts = value_alerts
 
     alerts.sort(key=lambda alert: alert["biggest_difference"]["absolute_difference"], reverse=True)
     previous_alerts = load_alert_state()
@@ -468,10 +480,10 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
         telegram = config["telegram"]
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         header = (
-            f"*Rainbet Odds Scanner* ({now})\n"
-            f"Oracle: `{POLYMARKET_BOOK}`\n"
-            f"Compared book: `{RAINBET_BOOK}`\n"
-            f"New or updated alerts: *{len(changed_alerts)}* / matched games: `{len(all_results)}`"
+            f"*Rainbet Betting Opportunities* ({now})\n"
+            f"Trusted oracle: `{POLYMARKET_BOOK}`\n"
+            f"Betting venue: `{RAINBET_BOOK}`\n"
+            f"New or updated opportunities: *{len(changed_alerts)}* / matched games: `{len(all_results)}`"
         )
         send_telegram_message(telegram["bot_token"], telegram["chat_id"], header)
 
