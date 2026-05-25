@@ -64,7 +64,7 @@ The Telegram values can also be supplied with `TELEGRAM_BOT_TOKEN` and
 | `difference_threshold_pct` | Minimum probability gap in percentage points. `0` alerts on any difference; `2` alerts on gaps of at least 2 points. |
 | `alert_rainbet_value_only` | Keep `true` to alert only when the candidate bet is priced better at Rainbet than at the Polymarket oracle. |
 | `status` | Odds-API event status filter, usually `pending,live`. |
-| `max_events_per_sport` | Maximum shared Rainbet/Polymarket events to compare per sport per scan. |
+| `max_events_per_sport` | Maximum Rainbet events per configured league to submit for Polymarket comparison per scan. |
 | `max_alerts_per_scan` | Caps Telegram detail messages per run; all matched events are still checked and ranked. |
 | `sports` | Default major-league keys: `nba`, `wnba`, `mlb`, `nhl`, `nfl`. Optional broad keys include `basketball`, `baseball`, `ice_hockey`, `american_football`, `football`, `tennis`, `esports`. |
 
