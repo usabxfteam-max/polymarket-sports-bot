@@ -1,10 +1,10 @@
 """
-Rainbet vs Polymarket odds difference alert bot for Telegram.
+Sportsbook vs Polymarket odds difference alert bot for Telegram.
 
-This bot uses Odds-API.io to fetch sports moneyline markets from Rainbet and
-Polymarket. Polymarket is treated as the oracle price. When Rainbet's implied
-probability differs from Polymarket by the configured threshold, the bot sends
-a Telegram alert.
+This bot uses Odds-API.io to fetch sports moneyline markets from a configured
+bookmaker and Polymarket. Polymarket is treated as the oracle price. When the
+configured book's implied probability beats Polymarket by the configured
+threshold, the bot sends a Telegram alert.
 """
 
 from __future__ import annotations
@@ -24,18 +24,18 @@ import requests
 
 BASE_DIR = Path(__file__).parent.resolve()
 CONFIG_PATH = BASE_DIR / "config.json"
-ALERT_STATE_PATH = BASE_DIR / "alert_state.json"
+ALERT_STATE_PATH = BASE_DIR / os.getenv("ALERT_STATE_FILE", "alert_state.json")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("rainbet_polymarket_bot")
+logger = logging.getLogger("sportsbook_polymarket_bot")
 
 ODDS_API = "https://api.odds-api.io/v3"
 POLYMARKET_BOOK = "Polymarket"
-RAINBET_BOOK = "Rainbet"
+DEFAULT_COMPARED_BOOK = "Rainbet"
 
 SPORTS_CONFIG: dict[str, dict[str, Any]] = {
     "basketball": {
@@ -246,41 +246,41 @@ def build_difference(
     team: str,
     side: str,
     polymarket_decimal: float,
-    rainbet_decimal: float,
+    compared_decimal: float,
     polymarket_raw: float,
-    rainbet_raw: float,
+    compared_raw: float,
 ) -> dict[str, Any]:
     poly_prob = implied_probability(polymarket_decimal)
-    rainbet_prob = implied_probability(rainbet_decimal)
-    probability_diff = rainbet_prob - poly_prob
+    compared_prob = implied_probability(compared_decimal)
+    probability_diff = compared_prob - poly_prob
 
     return {
         "team": team,
         "side": side,
         "polymarket_probability": poly_prob,
-        "rainbet_probability": rainbet_prob,
+        "compared_probability": compared_prob,
         "probability_difference": probability_diff,
         "absolute_difference": abs(probability_diff),
         "polymarket_decimal": polymarket_decimal,
-        "rainbet_decimal": rainbet_decimal,
+        "compared_decimal": compared_decimal,
         "polymarket_raw": polymarket_raw,
-        "rainbet_raw": rainbet_raw,
-        "value_signal": "rainbet_value"
+        "compared_raw": compared_raw,
+        "value_signal": "compared_book_value"
         if probability_diff < 0
-        else "rainbet_expensive"
+        else "compared_book_expensive"
         if probability_diff > 0
         else "even",
     }
 
 
-def analyze_event(odds_data: dict, threshold_pct: float) -> dict | None:
+def analyze_event(odds_data: dict, threshold_pct: float, compared_book: str) -> dict | None:
     bookmakers = odds_data.get("bookmakers")
     if not isinstance(bookmakers, dict):
         return None
 
     polymarket = parse_moneyline(bookmakers.get(POLYMARKET_BOOK))
-    rainbet = parse_moneyline(bookmakers.get(RAINBET_BOOK))
-    if not polymarket or not rainbet:
+    compared = parse_moneyline(bookmakers.get(compared_book))
+    if not polymarket or not compared:
         return None
 
     home_team = str(odds_data.get("home") or "Unknown Home")
@@ -292,28 +292,28 @@ def analyze_event(odds_data: dict, threshold_pct: float) -> dict | None:
         home_team,
         "home",
         polymarket["home"],
-        rainbet["home"],
+        compared["home"],
         polymarket["home_raw"],
-        rainbet["home_raw"],
+        compared["home_raw"],
     )
     away_diff = build_difference(
         away_team,
         "away",
         polymarket["away"],
-        rainbet["away"],
+        compared["away"],
         polymarket["away_raw"],
-        rainbet["away_raw"],
+        compared["away_raw"],
     )
     differences = [home_diff, away_diff]
-    if polymarket.get("draw", 0) > 1 and rainbet.get("draw", 0) > 1:
+    if polymarket.get("draw", 0) > 1 and compared.get("draw", 0) > 1:
         differences.append(
             build_difference(
                 "Draw",
                 "draw",
                 polymarket["draw"],
-                rainbet["draw"],
+                compared["draw"],
                 polymarket["draw_raw"],
-                rainbet["draw_raw"],
+                compared["draw_raw"],
             )
         )
     biggest = max(differences, key=lambda difference: difference["absolute_difference"])
@@ -321,6 +321,7 @@ def analyze_event(odds_data: dict, threshold_pct: float) -> dict | None:
     return {
         "home_team": home_team,
         "away_team": away_team,
+        "compared_book": compared_book,
         "league": league.get("name", "Unknown League"),
         "sport": sport.get("name", "Unknown Sport"),
         "status": odds_data.get("status", "unknown"),
@@ -333,29 +334,37 @@ def analyze_event(odds_data: dict, threshold_pct: float) -> dict | None:
     }
 
 
-def scan_sport(client: OddsApiClient, sport_key: str, status: str, max_events: int, threshold_pct: float) -> list[dict]:
+def scan_sport(
+    client: OddsApiClient,
+    sport_key: str,
+    status: str,
+    max_events: int,
+    threshold_pct: float,
+    compared_book: str,
+) -> list[dict]:
     config = SPORTS_CONFIG[sport_key]
-    rainbet_events = client.get_events(config["api_slug"], status, RAINBET_BOOK)
+    compared_events = client.get_events(config["api_slug"], status, compared_book)
     events_to_compare = [
         event
-        for event in rainbet_events
+        for event in compared_events
         if league_matches(str(event.get("league", {}).get("name", "")), config["league_keywords"])
     ][:max_events]
 
     event_ids = [int(event["id"]) for event in events_to_compare if event.get("id")]
     logger.info(
-        "%s: %s Rainbet event(s) submitted for Polymarket comparison",
+        "%s: %s %s event(s) submitted for Polymarket comparison",
         config["display_name"],
         len(event_ids),
+        compared_book,
     )
 
     analyses: list[dict] = []
     for index in range(0, len(event_ids), 10):
         batch = event_ids[index:index + 10]
-        odds_list = client.get_multi_odds(batch, [POLYMARKET_BOOK, RAINBET_BOOK])
+        odds_list = client.get_multi_odds(batch, [POLYMARKET_BOOK, compared_book])
         for odds_data in odds_list:
             if isinstance(odds_data, dict):
-                analysis = analyze_event(odds_data, threshold_pct)
+                analysis = analyze_event(odds_data, threshold_pct, compared_book)
                 if analysis:
                     analyses.append(analysis)
 
@@ -384,15 +393,15 @@ def escape_markdown(text: str) -> str:
     return str(text).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
 
 
-def format_difference_line(diff: dict) -> str:
+def format_difference_line(diff: dict, compared_book: str) -> str:
     sign = "+" if diff["probability_difference"] >= 0 else ""
-    label = "Rainbet higher" if diff["probability_difference"] > 0 else "Rainbet value"
+    label = f"{compared_book} higher" if diff["probability_difference"] > 0 else f"{compared_book} value"
     return (
         f"*{escape_markdown(diff['team'])}* ({diff['side']})\n"
         f"Polymarket: `{diff['polymarket_probability'] * 100:.1f}%` "
         f"({format_odds(diff['polymarket_raw'], diff['polymarket_decimal'])})\n"
-        f"Rainbet: `{diff['rainbet_probability'] * 100:.1f}%` "
-        f"({format_odds(diff['rainbet_raw'], diff['rainbet_decimal'])})\n"
+        f"{escape_markdown(compared_book)}: `{diff['compared_probability'] * 100:.1f}%` "
+        f"({format_odds(diff['compared_raw'], diff['compared_decimal'])})\n"
         f"Diff: *{sign}{diff['probability_difference'] * 100:.1f}%* - {label}"
     )
 
@@ -400,15 +409,16 @@ def format_difference_line(diff: dict) -> str:
 def format_alert(alert: dict) -> str:
     biggest = alert["biggest_difference"]
     date = alert.get("date") or "unknown time"
+    compared_book = alert["compared_book"]
     return (
-        "*Rainbet Betting Opportunity*\n"
-        f"Trusted oracle: `{POLYMARKET_BOOK}` | Bet at: `{RAINBET_BOOK}`\n"
+        f"*{escape_markdown(compared_book)} Betting Opportunity*\n"
+        f"Trusted oracle: `{POLYMARKET_BOOK}` | Bet at: `{escape_markdown(compared_book)}`\n"
         f"_{escape_markdown(alert['league'])}_\n"
         f"`{date}`\n\n"
         f"*{escape_markdown(alert['home_team'])} vs {escape_markdown(alert['away_team'])}*\n"
-        f"Candidate Rainbet bet: *{escape_markdown(biggest['team'])}* "
+        f"Candidate {escape_markdown(compared_book)} bet: *{escape_markdown(biggest['team'])}* "
         f"`{biggest['probability_difference'] * 100:+.1f}%`\n\n" +
-        "\n\n".join(format_difference_line(difference) for difference in alert["differences"])
+        "\n\n".join(format_difference_line(difference, compared_book) for difference in alert["differences"])
     )
 
 
@@ -429,7 +439,7 @@ def alert_signature(alert: dict) -> dict[str, float]:
     signature: dict[str, float] = {}
     for difference in alert["differences"]:
         signature[f"poly_{difference['side']}"] = difference["polymarket_decimal"]
-        signature[f"rainbet_{difference['side']}"] = difference["rainbet_decimal"]
+        signature[f"compared_{difference['side']}"] = difference["compared_decimal"]
     return signature
 
 
@@ -458,8 +468,9 @@ def load_config() -> dict:
         "odds_api": {},
         "scanner": {
             "interval_minutes": 10,
+            "compared_book": DEFAULT_COMPARED_BOOK,
             "difference_threshold_pct": 0,
-            "alert_rainbet_value_only": True,
+            "alert_value_only": True,
             "status": "pending,live",
             "max_events_per_sport": 50,
             "max_alerts_per_scan": 20,
@@ -496,6 +507,10 @@ def load_config() -> dict:
 def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
     scanner = config["scanner"]
     api_key = get_config_value(config, ["odds_api", "api_key"], "ODDS_API_KEY")
+    compared_book = (
+        os.getenv("COMPARED_BOOK")
+        or str(scanner.get("compared_book") or DEFAULT_COMPARED_BOOK)
+    )
     sports = scanner.get(
         "sports",
         ["nba", "wnba", "mlb", "nhl", "nfl"],
@@ -504,32 +519,32 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
     threshold_pct = float(scanner.get("difference_threshold_pct", 0))
     max_events = int(scanner.get("max_events_per_sport", 50))
     max_alerts = int(scanner.get("max_alerts_per_scan", 20))
-    value_only = bool(scanner.get("alert_rainbet_value_only", True))
+    value_only = bool(scanner.get("alert_value_only", scanner.get("alert_rainbet_value_only", True)))
 
     client = OddsApiClient(api_key)
     all_results: list[dict] = []
 
-    logger.info("--- Starting Rainbet vs Polymarket scan ---")
+    logger.info("--- Starting %s vs Polymarket scan ---", compared_book)
     for sport in sports:
         if sport not in SPORTS_CONFIG:
             logger.warning("Skipping unsupported sport key: %s", sport)
             continue
-        all_results.extend(scan_sport(client, sport, status, max_events, threshold_pct))
+        all_results.extend(scan_sport(client, sport, status, max_events, threshold_pct, compared_book))
 
     alerts = [result for result in all_results if result["is_alert"]]
     if value_only:
         value_alerts = []
         for alert in alerts:
-            rainbet_values = [
+            value_opportunities = [
                 difference
                 for difference in alert["differences"]
                 if difference["probability_difference"] < 0
                 and difference["absolute_difference"] * 100 >= threshold_pct
             ]
-            if rainbet_values:
+            if value_opportunities:
                 opportunity = dict(alert)
                 opportunity["biggest_difference"] = max(
-                    rainbet_values,
+                    value_opportunities,
                     key=lambda difference: difference["absolute_difference"],
                 )
                 value_alerts.append(opportunity)
@@ -558,9 +573,9 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
         telegram = config["telegram"]
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         header = (
-            f"*Rainbet Betting Opportunities* ({now})\n"
+            f"*{escape_markdown(compared_book)} Betting Opportunities* ({now})\n"
             f"Trusted oracle: `{POLYMARKET_BOOK}`\n"
-            f"Betting venue: `{RAINBET_BOOK}`\n"
+            f"Betting venue: `{escape_markdown(compared_book)}`\n"
             f"New or updated opportunities: *{len(changed_alerts)}* / matched games: `{len(all_results)}`\n"
             f"Sending top opportunities: `{len(notification_alerts)}`"
         )
@@ -572,13 +587,13 @@ def run_scan_cycle(config: dict, send_alerts: bool = True) -> list[dict]:
     elif send_alerts and alerts:
         logger.info("No changed odds since the last alerted comparison.")
     elif not alerts:
-        logger.info("No Rainbet/Polymarket differences met the configured threshold.")
+        logger.info("No %s/Polymarket differences met the configured threshold.", compared_book)
 
     return changed_alerts
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare Rainbet odds against Polymarket and alert on Telegram.")
+    parser = argparse.ArgumentParser(description="Compare sportsbook odds against Polymarket and alert on Telegram.")
     parser.add_argument(
         "--once",
         action="store_true",
@@ -587,7 +602,7 @@ def main() -> None:
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("  Rainbet vs Polymarket Sports Alert Bot")
+    logger.info("  Sportsbook vs Polymarket Sports Alert Bot")
     logger.info("=" * 60)
 
     config = load_config()
@@ -600,8 +615,8 @@ def main() -> None:
     send_telegram_message(
         config["telegram"]["bot_token"],
         config["telegram"]["chat_id"],
-        "*Rainbet Odds Bot Started*\n"
-        f"Comparing `{RAINBET_BOOK}` against `{POLYMARKET_BOOK}` every {interval_min:g} minutes.",
+        "*Sportsbook Odds Bot Started*\n"
+        f"Comparing `{config['scanner'].get('compared_book', DEFAULT_COMPARED_BOOK)}` against `{POLYMARKET_BOOK}` every {interval_min:g} minutes.",
     )
 
     while True:
@@ -623,7 +638,7 @@ def main() -> None:
             send_telegram_message(
                 config["telegram"]["bot_token"],
                 config["telegram"]["chat_id"],
-                "*Rainbet Odds Bot Stopped*",
+                "*Sportsbook Odds Bot Stopped*",
             )
             break
 

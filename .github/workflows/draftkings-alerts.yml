@@ -1,28 +1,28 @@
-name: Rainbet Odds Alerts
+name: DraftKings Odds Alerts
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "5/10 * * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: rainbet-odds-alerts
+  group: draftkings-odds-alerts
   cancel-in-progress: true
 
 jobs:
   scan:
-    name: Compare Rainbet against Polymarket
+    name: Compare DraftKings against Polymarket
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      COMPARED_BOOK: Rainbet
-      ALERT_STATE_FILE: alert_state_rainbet.json
+      COMPARED_BOOK: DraftKings
+      ALERT_STATE_FILE: alert_state_draftkings.json
 
     steps:
       - name: Check out repository
@@ -40,10 +40,10 @@ jobs:
       - name: Restore alert state
         uses: actions/cache/restore@v4
         with:
-          path: alert_state.json
-          key: rainbet-alert-state-${{ github.run_id }}
+          path: alert_state_draftkings.json
+          key: draftkings-alert-state-${{ github.run_id }}
           restore-keys: |
-            rainbet-alert-state-
+            draftkings-alert-state-
 
       - name: Run odds comparison scan
         run: python bot.py --once
@@ -51,5 +51,5 @@ jobs:
       - name: Save alert state
         uses: actions/cache/save@v4
         with:
-          path: alert_state.json
-          key: rainbet-alert-state-${{ github.run_id }}
+          path: alert_state_draftkings.json
+          key: draftkings-alert-state-${{ github.run_id }}

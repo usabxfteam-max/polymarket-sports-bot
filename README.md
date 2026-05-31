@@ -1,15 +1,15 @@
-# Rainbet vs Polymarket Sports Alert Bot
+# Sportsbook vs Polymarket Sports Alert Bot
 
-A Telegram bot that compares **Rainbet** moneyline odds against **Polymarket** prices through [Odds-API.io](https://docs.odds-api.io/).
+A Telegram bot that compares a configured sportsbook's moneyline odds against **Polymarket** prices through [Odds-API.io](https://docs.odds-api.io/).
 
-Polymarket is treated as the trusted oracle. Rainbet is the betting venue. The bot sends a Telegram signal only when Rainbet offers a cheaper implied probability than Polymarket for the same outcome.
+Polymarket is treated as the trusted oracle. The configured sportsbook is the betting venue. The bot sends a Telegram signal only when the betting venue offers a cheaper implied probability than Polymarket for the same outcome.
 
 ## How It Works
 
-1. Fetches active or upcoming Rainbet events for the configured leagues through Odds-API.io
-2. Pulls batched odds for `Polymarket,Rainbet`; events without both prices are ignored
+1. Fetches active or upcoming sportsbook events for the configured leagues through Odds-API.io
+2. Pulls batched odds for `Polymarket` and the configured betting venue; events without both prices are ignored
 3. Compares moneyline implied probability for home and away outcomes
-4. Sends Telegram alerts only for candidate bets at Rainbet priced better than the Polymarket oracle
+4. Sends Telegram alerts only for candidate bets priced better than the Polymarket oracle
 5. Sends a follow-up only when the compared odds change
 6. Repeats every configured interval
 
@@ -42,8 +42,9 @@ Edit `config.json`:
     },
     "scanner": {
         "interval_minutes": 10,
+        "compared_book": "Rainbet",
         "difference_threshold_pct": 0,
-        "alert_rainbet_value_only": true,
+        "alert_value_only": true,
         "status": "pending,live",
         "max_events_per_sport": 50,
         "max_alerts_per_scan": 20,
@@ -61,10 +62,11 @@ The Telegram values can also be supplied with `TELEGRAM_BOT_TOKEN` and
 
 | Setting | Description |
 |---------|-------------|
+| `compared_book` | Betting venue to compare against Polymarket, e.g. `Rainbet` or `DraftKings`. |
 | `difference_threshold_pct` | Minimum probability gap in percentage points. `0` alerts on any difference; `2` alerts on gaps of at least 2 points. |
-| `alert_rainbet_value_only` | Keep `true` to alert only when the candidate bet is priced better at Rainbet than at the Polymarket oracle. |
+| `alert_value_only` | Keep `true` to alert only when the candidate bet is priced better at the betting venue than at the Polymarket oracle. |
 | `status` | Odds-API event status filter, usually `pending,live`. |
-| `max_events_per_sport` | Maximum Rainbet events per configured league to submit for Polymarket comparison per scan. |
+| `max_events_per_sport` | Maximum sportsbook events per configured league to submit for Polymarket comparison per scan. |
 | `max_alerts_per_scan` | Caps Telegram detail messages per run; all matched events are still checked and ranked. |
 | `sports` | Default major-league keys: `nba`, `wnba`, `mlb`, `nhl`, `nfl`. Optional broad keys include `basketball`, `baseball`, `ice_hockey`, `american_football`, `football`, `tennis`, `esports`. |
 
@@ -82,8 +84,8 @@ python bot.py --once
 
 ## Run On GitHub Actions
 
-The included workflow at `.github/workflows/rainbet-alerts.yml` runs one scan
-every ten minutes.
+The included Rainbet workflow at `.github/workflows/rainbet-alerts.yml` runs one scan every ten minutes.
+The separate DraftKings workflow at `.github/workflows/draftkings-alerts.yml` runs one scan every ten minutes on the opposite five-minute offset.
 It caches the last alerted odds so an unchanged difference is not resent on
 each scheduled run.
 
@@ -97,7 +99,7 @@ and create these repository secrets:
 | `TELEGRAM_CHAT_ID` | The chat ID to receive alerts |
 
 After committing the workflow to the repository default branch, open the
-**Actions** tab and run **Rainbet Odds Alerts** once with **Run workflow** to
+**Actions** tab and run **Rainbet Odds Alerts** or **DraftKings Odds Alerts** once with **Run workflow** to
 confirm the secret setup. Scheduled runs then execute automatically.
 
 GitHub scheduled jobs can be delayed during high load. On public repositories,
@@ -106,18 +108,18 @@ GitHub disables scheduled workflows after 60 days without repository activity.
 ## Example Telegram Alert
 
 ```text
-Rainbet Betting Opportunity
-Trusted oracle: Polymarket | Bet at: Rainbet
+DraftKings Betting Opportunity
+Trusted oracle: Polymarket | Bet at: DraftKings
 USA - NBA
 2026-05-26T00:00:00Z
 
 Cleveland Cavaliers vs New York Knicks
-Candidate Rainbet bet: Cleveland Cavaliers -3.1%
+Candidate DraftKings bet: Cleveland Cavaliers -3.1%
 
 Cleveland Cavaliers (home)
 Polymarket: 48.1% (2.08)
-Rainbet: 45.0% (2.22)
-Diff: -3.1% - Rainbet value
+DraftKings: 45.0% (2.22)
+Diff: -3.1% - DraftKings value
 ```
 
 ## Notes
@@ -125,7 +127,7 @@ Diff: -3.1% - Rainbet value
 - Only moneyline (`ML`) markets are compared.
 - Three-way football/soccer moneylines include draw outcomes.
 - Polymarket is used as the trusted reference price.
-- Rainbet lower implied probability than Polymarket means Rainbet offers the candidate betting opportunity.
-- Alerts provide signals for betting at Rainbet; the bot does not submit wagers.
-- A league such as MLB is tracked, but no comparison is possible during scans where Rainbet has no matching MLB event listed.
+- The betting venue's lower implied probability than Polymarket means it offers the candidate betting opportunity.
+- Alerts provide signals for betting at the configured venue; the bot does not submit wagers.
+- A league such as MLB is tracked, but no comparison is possible during scans where the betting venue has no matching MLB event listed.
 - Odds-API.io permits 100 requests per hour on the configured key. The default major-league scan is designed for the 10-minute workflow; enabling broad football, tennis, or esports coverage may exceed that limit.

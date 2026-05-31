@@ -8,8 +8,9 @@
     },
     "scanner": {
         "interval_minutes": 10,
+        "compared_book": "Rainbet",
         "difference_threshold_pct": 0,
-        "alert_rainbet_value_only": true,
+        "alert_value_only": true,
         "status": "pending,live",
         "max_events_per_sport": 50,
         "max_alerts_per_scan": 20,
